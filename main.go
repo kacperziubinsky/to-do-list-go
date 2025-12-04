@@ -34,7 +34,7 @@ func (jt JSONTime) MarshalJSON() ([]byte, error) {
 }
 
 func randomDate() JSONTime {
-    days := rand.Intn(30) 
+    days := rand.Intn(30)
     d := time.Now().AddDate(0, 0, -days)
     return JSONTime(d)
 }
@@ -99,7 +99,12 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func deleteTask(w http.ResponseWriter, r *http.Request) {
-    idStr := strings.TrimPrefix(r.URL.Path, "/tasks/")
+    if r.Method != http.MethodDelete {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    idStr := strings.TrimPrefix(r.URL.Path, "/tasks/delete/")
     if idStr == "" {
         http.Error(w, "Task ID is required", http.StatusBadRequest)
         return
@@ -118,7 +123,6 @@ func deleteTask(w http.ResponseWriter, r *http.Request) {
     }
     http.Error(w, "Task not found", http.StatusNotFound)
 }
-
 
 func currentTasks(status string) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +143,67 @@ func currentTasks(status string) http.Handler {
     })
 }
 
+func changeTaskStatus(id int, status string) error {
+    for i, task := range tasks {
+        if task.ID == id {
+            tasks[i].Status = status
+            return nil
+        }
+    }
+    return fmt.Errorf("Task not found")
+}
+
+func markTaskCompleted(id int) error {
+    return changeTaskStatus(id, "Completed")
+}
+
+func markTaskInProgress(id int) error {
+    return changeTaskStatus(id, "In Progress")
+}
+
+func markTaskPending(id int) error {
+    return changeTaskStatus(id, "Pending")
+}
+
+func makeStatusHandler(change func(int) error) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost && r.Method != http.MethodPatch {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+        if len(parts) < 3 {
+            http.Error(w, "Task ID is required", http.StatusBadRequest)
+            return
+        }
+
+        idStr := parts[len(parts)-1]
+        id, err := strconv.Atoi(idStr)
+        if err != nil {
+            http.Error(w, "Invalid Task ID", http.StatusBadRequest)
+            return
+        }
+
+        if err := change(id); err != nil {
+            http.Error(w, "Task not found", http.StatusNotFound)
+            return
+        }
+
+        for _, task := range tasks {
+            if task.ID == id {
+                w.Header().Set("Content-Type", "application/json")
+                json.NewEncoder(w).Encode(task)
+                return
+            }
+        }
+
+        http.Error(w, "Task not found", http.StatusNotFound)
+    }
+}
+
+
+
 type homeHandler struct{}
 
 func (h *homeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +212,8 @@ func (h *homeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func main() {
     rand.Seed(time.Now().UnixNano())
+
+    fmt.Println("Starting server on :8080")
 
     tasks = append(tasks, Task{
         ID: 1, Name: "Sample Task", Description: "This is a sample task",
@@ -183,6 +250,12 @@ func main() {
     mux.Handle("/tasks/current", currentTasks("Pending"))
     mux.Handle("/tasks/completed", currentTasks("Completed"))
     mux.Handle("/tasks/in-progress", currentTasks("In Progress"))
+
+    mux.HandleFunc("/tasks/complete/", makeStatusHandler(markTaskCompleted))
+    mux.HandleFunc("/tasks/in-progress/", makeStatusHandler(markTaskInProgress))
+    mux.HandleFunc("/tasks/pending/", makeStatusHandler(markTaskPending))
+
+
 
     http.ListenAndServe(":8080", mux)
 }
