@@ -1,14 +1,19 @@
 package main
 
 import (
+    "database/sql"
     "encoding/json"
     "fmt"
-    "math/rand"
+    "log"
     "net/http"
     "strconv"
     "strings"
     "time"
+
+    _ "modernc.org/sqlite"
 )
+
+var db *sql.DB
 
 type JSONTime time.Time
 
@@ -33,12 +38,6 @@ func (jt JSONTime) MarshalJSON() ([]byte, error) {
     return []byte(fmt.Sprintf("\"%s\"", formatted)), nil
 }
 
-func randomDate() JSONTime {
-    days := rand.Intn(30)
-    d := time.Now().AddDate(0, 0, -days)
-    return JSONTime(d)
-}
-
 type Task struct {
     ID          int      `json:"id"`
     Name        string   `json:"name"`
@@ -47,9 +46,35 @@ type Task struct {
     Date        JSONTime `json:"date"`
 }
 
-var tasks []Task
-
 func getAllTasks(w http.ResponseWriter, r *http.Request) {
+    rows, err := db.Query("SELECT id, name, description, status, date FROM tasks")
+    if err != nil {
+        log.Printf("SELECT query error: %v", err)
+        http.Error(w, "Database read error", http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    var tasks []Task
+    for rows.Next() {
+        var t Task
+        var dateStr string
+
+        err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.Status, &dateStr)
+        if err != nil {
+            log.Printf("Row scanning error: %v", err)
+            continue
+        }
+
+        parsedTime, err := time.Parse("2006-01-02", dateStr)
+        if err != nil {
+            log.Printf("Date parsing error: %v", err)
+            continue
+        }
+        t.Date = JSONTime(parsedTime)
+        tasks = append(tasks, t)
+    }
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(tasks)
 }
@@ -67,14 +92,27 @@ func getTask(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    for _, task := range tasks {
-        if task.ID == id {
-            w.Header().Set("Content-Type", "application/json")
-            json.NewEncoder(w).Encode(task)
-            return
-        }
+    row := db.QueryRow("SELECT id, name, description, status, date FROM tasks WHERE id = ?", id)
+
+    var task Task
+    var dateStr string
+
+    err = row.Scan(&task.ID, &task.Name, &task.Description, &task.Status, &dateStr)
+    if err == sql.ErrNoRows {
+        http.Error(w, "Task not found", http.StatusNotFound)
+        return
     }
-    http.Error(w, "Task not found", http.StatusNotFound)
+    if err != nil {
+        log.Printf("Task scanning error: %v", err)
+        http.Error(w, "Database read error", http.StatusInternalServerError)
+        return
+    }
+
+    parsedTime, _ := time.Parse("2006-01-02", dateStr)
+    task.Date = JSONTime(parsedTime)
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(task)
 }
 
 func createTask(w http.ResponseWriter, r *http.Request) {
@@ -90,8 +128,25 @@ func createTask(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    newTask.ID = len(tasks) + 1
-    tasks = append(tasks, newTask)
+    if time.Time(newTask.Date).IsZero() {
+        newTask.Date = JSONTime(time.Now())
+    }
+
+    dateFormatted := time.Time(newTask.Date).Format("2006-01-02")
+
+    result, err := db.Exec(
+        "INSERT INTO tasks (name, description, status, date) VALUES (?, ?, ?, ?)",
+        newTask.Name, newTask.Description, "Pending", dateFormatted,
+    )
+    if err != nil {
+        log.Printf("Database insert error: %v", err)
+        http.Error(w, "Database write error", http.StatusInternalServerError)
+        return
+    }
+
+    id, _ := result.LastInsertId()
+    newTask.ID = int(id)
+    newTask.Status = "Pending"
 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusCreated)
@@ -104,65 +159,89 @@ func deleteTask(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    idStr := strings.TrimPrefix(r.URL.Path, "/tasks/delete/")
-    if idStr == "" {
+    parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+    if len(parts) < 3 {
         http.Error(w, "Task ID is required", http.StatusBadRequest)
         return
     }
+    idStr := parts[len(parts)-1]
+
     id, err := strconv.Atoi(idStr)
     if err != nil {
         http.Error(w, "Invalid Task ID", http.StatusBadRequest)
         return
     }
-    for i, task := range tasks {
-        if task.ID == id {
-            tasks = append(tasks[:i], tasks[i+1:]...)
-            w.WriteHeader(http.StatusNoContent)
-            return
-        }
+
+    result, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
+    if err != nil {
+        http.Error(w, "Database error during deletion", http.StatusInternalServerError)
+        return
     }
-    http.Error(w, "Task not found", http.StatusNotFound)
+
+    rowsAffected, _ := result.RowsAffected()
+    if rowsAffected == 0 {
+        http.Error(w, "Task not found", http.StatusNotFound)
+        return
+    }
+
+    w.WriteHeader(http.StatusNoContent)
 }
 
-func currentTasks(status string) http.Handler {
+func getTasksByStatus(status string) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        var filtered []Task
-        for _, task := range tasks {
-            if task.Status == status {
-                filtered = append(filtered, task)
+        rows, err := db.Query("SELECT id, name, description, status, date FROM tasks WHERE status = ?", status)
+        if err != nil {
+            log.Printf("SELECT query error (status): %v", err)
+            http.Error(w, "Database read error", http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+
+        var filteredTasks []Task
+        for rows.Next() {
+            var t Task
+            var dateStr string
+            if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.Status, &dateStr); err != nil {
+                log.Printf("Row scanning error (status): %v", err)
+                continue
             }
+            parsedTime, _ := time.Parse("2006-01-02", dateStr)
+            t.Date = JSONTime(parsedTime)
+            filteredTasks = append(filteredTasks, t)
         }
 
-        if len(filtered) == 0 {
-            http.Error(w, "Task not found", http.StatusNotFound)
+        if len(filteredTasks) == 0 {
+            http.Error(w, fmt.Sprintf("No tasks found with status: %s", status), http.StatusNotFound)
             return
         }
 
         w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(filtered)
+        json.NewEncoder(w).Encode(filteredTasks)
     })
 }
 
-func changeTaskStatus(id int, status string) error {
-    for i, task := range tasks {
-        if task.ID == id {
-            tasks[i].Status = status
-            return nil
-        }
+func updateTaskStatus(id int, status string) error {
+    result, err := db.Exec("UPDATE tasks SET status = ? WHERE id = ?", status, id)
+    if err != nil {
+        return err
     }
-    return fmt.Errorf("Task not found")
+    rowsAffected, _ := result.RowsAffected()
+    if rowsAffected == 0 {
+        return fmt.Errorf("Task not found")
+    }
+    return nil
 }
 
-func markTaskCompleted(id int) error {
-    return changeTaskStatus(id, "Completed")
+func setTaskCompleted(id int) error {
+    return updateTaskStatus(id, "Completed")
 }
 
-func markTaskInProgress(id int) error {
-    return changeTaskStatus(id, "In Progress")
+func setTaskInProgress(id int) error {
+    return updateTaskStatus(id, "In Progress")
 }
 
-func markTaskPending(id int) error {
-    return changeTaskStatus(id, "Pending")
+func setTaskPending(id int) error {
+    return updateTaskStatus(id, "Pending")
 }
 
 func makeStatusHandler(change func(int) error) http.HandlerFunc {
@@ -190,55 +269,62 @@ func makeStatusHandler(change func(int) error) http.HandlerFunc {
             return
         }
 
-        for _, task := range tasks {
-            if task.ID == id {
-                w.Header().Set("Content-Type", "application/json")
-                json.NewEncoder(w).Encode(task)
-                return
-            }
+        row := db.QueryRow("SELECT id, name, description, status, date FROM tasks WHERE id = ?", id)
+        var task Task
+        var dateStr string
+        if err := row.Scan(&task.ID, &task.Name, &task.Description, &task.Status, &dateStr); err != nil {
+            http.Error(w, "Database read error after update", http.StatusInternalServerError)
+            return
         }
+        parsedTime, _ := time.Parse("2006-01-02", dateStr)
+        task.Date = JSONTime(parsedTime)
 
-        http.Error(w, "Task not found", http.StatusNotFound)
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(task)
     }
 }
-
-
 
 type homeHandler struct{}
 
 func (h *homeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintln(w, "Welcome to the Task Management API")
+    fmt.Fprintln(w, "Welcome to the Task Management API (SQLite Edition)")
+    fmt.Fprintln(w, "\nAvailable Endpoints:")
+    fmt.Fprintln(w, "GET    /tasks")
+    fmt.Fprintln(w, "GET    /tasks/{id}")
+    fmt.Fprintln(w, "POST   /tasks/create (JSON payload)")
+    fmt.Fprintln(w, "DELETE /tasks/delete/{id}")
+    fmt.Fprintln(w, "GET    /tasks/pending, /tasks/completed, /tasks/in-progress (Filter by status)")
+    fmt.Fprintln(w, "POST   /tasks/complete/{id}, /tasks/in-progress/{id}, /tasks/pending/{id} (Change status)")
 }
 
 func main() {
-    rand.Seed(time.Now().UnixNano())
+    var err error
 
-    fmt.Println("Starting server on :8080")
+    db, err = sql.Open("sqlite", "./tasks.db")
+    if err != nil {
+        log.Fatalf("Database open error: %v", err)
+    }
+    defer db.Close()
 
-    tasks = append(tasks, Task{
-        ID: 1, Name: "Sample Task", Description: "This is a sample task",
-        Status: "Pending", Date: randomDate(),
-    })
+    if err = db.Ping(); err != nil {
+        log.Fatalf("Database connection error: %v", err)
+    }
 
-    tasks = append(tasks, Task{
-        ID: 2, Name: "Another Task", Description: "This is another task",
-        Status: "Pending", Date: randomDate(),
-    })
+    sqlStmt := `
+    CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        description TEXT,
+        status TEXT,
+        date TEXT
+    );`
+    _, err = db.Exec(sqlStmt)
+    if err != nil {
+        log.Fatalf("SQLite table creation error: %s", err)
+    }
 
-    tasks = append(tasks, Task{
-        ID: 3, Name: "Completed Task", Description: "This task is completed",
-        Status: "Completed", Date: randomDate(),
-    })
-
-    tasks = append(tasks, Task{
-        ID: 4, Name: "In Progress Task", Description: "This task is in progress",
-        Status: "In Progress", Date: randomDate(),
-    })
-
-    tasks = append(tasks, Task{
-        ID: 5, Name: "Final Task", Description: "This is the final task",
-        Status: "Pending", Date: randomDate(),
-    })
+    fmt.Println("Connected to SQLite database file tasks.db!")
+    fmt.Println("Application ready to run. Listening on :8080")
 
     mux := http.NewServeMux()
 
@@ -247,15 +333,14 @@ func main() {
     mux.HandleFunc("/tasks/", getTask)
     mux.HandleFunc("/tasks/create", createTask)
     mux.HandleFunc("/tasks/delete/", deleteTask)
-    mux.Handle("/tasks/current", currentTasks("Pending"))
-    mux.Handle("/tasks/completed", currentTasks("Completed"))
-    mux.Handle("/tasks/in-progress", currentTasks("In Progress"))
 
-    mux.HandleFunc("/tasks/complete/", makeStatusHandler(markTaskCompleted))
-    mux.HandleFunc("/tasks/in-progress/", makeStatusHandler(markTaskInProgress))
-    mux.HandleFunc("/tasks/pending/", makeStatusHandler(markTaskPending))
+    mux.Handle("/tasks/pending", getTasksByStatus("Pending"))
+    mux.Handle("/tasks/completed", getTasksByStatus("Completed"))
+    mux.Handle("/tasks/in-progress", getTasksByStatus("In Progress"))
 
+    mux.HandleFunc("/tasks/complete/", makeStatusHandler(setTaskCompleted))
+    mux.HandleFunc("/tasks/in-progress/", makeStatusHandler(setTaskInProgress))
+    mux.HandleFunc("/tasks/pending/", makeStatusHandler(setTaskPending))
 
-
-    http.ListenAndServe(":8080", mux)
+    log.Fatal(http.ListenAndServe(":8080", mux))
 }
