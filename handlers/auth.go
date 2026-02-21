@@ -51,7 +51,6 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash password with bcrypt
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("Bcrypt error: %v", err)
@@ -99,12 +98,10 @@ func Login(w http.ResponseWriter, r *http.Request) {
 	err := db.DB.QueryRow("SELECT id, username, password FROM users WHERE username = ?", req.Username).
 		Scan(&user.ID, &user.Username, &hashedPassword)
 	if err != nil {
-		// Return same error for both "not found" and DB error to avoid username enumeration
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
 
-	// Compare bcrypt hash
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.Password)); err != nil {
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return

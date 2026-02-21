@@ -48,29 +48,24 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Public routes
 	mux.Handle("/", &homeHandler{})
 	mux.HandleFunc("/register", handlers.Register)
 	mux.HandleFunc("/login", handlers.Login)
 	mux.HandleFunc("/logout", middleware.Auth(handlers.Logout))
 
-	// Task routes
 	mux.HandleFunc("/tasks", middleware.Auth(handlers.GetAllTasks))
 	mux.HandleFunc("/tasks/create", middleware.Auth(handlers.CreateTask))
 	mux.HandleFunc("/tasks/delete/", middleware.Auth(handlers.DeleteTask))
 	mux.HandleFunc("/tasks/update/", middleware.Auth(handlers.UpdateTask))
 
-	// Status filter routes (must be before /tasks/)
 	mux.HandleFunc("/tasks/pending", middleware.Auth(handlers.GetTasksByStatus("Pending")))
 	mux.HandleFunc("/tasks/completed", middleware.Auth(handlers.GetTasksByStatus("Completed")))
 	mux.HandleFunc("/tasks/in-progress", middleware.Auth(handlers.GetTasksByStatus("In Progress")))
 
-	// Status update routes
 	mux.HandleFunc("/tasks/complete/", middleware.Auth(handlers.MakeStatusHandler("Completed")))
 	mux.HandleFunc("/tasks/in-progress/", middleware.Auth(handlers.MakeStatusHandler("In Progress")))
 	mux.HandleFunc("/tasks/pending/", middleware.Auth(handlers.MakeStatusHandler("Pending")))
 
-	// Generic task by ID (must be last)
 	mux.HandleFunc("/tasks/", middleware.Auth(handlers.GetTask))
 
 	log.Fatal(http.ListenAndServe(":8080", mux))

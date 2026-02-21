@@ -14,14 +14,6 @@ import (
 	"moj_pierwszy_projekt/models"
 )
 
-// -------------------- GET /tasks --------------------
-// Query params:
-//   search=keyword        (searches name and description)
-//   sort=date|name|status (default: date)
-//   order=asc|desc        (default: asc)
-//   status=Pending|Completed|In Progress
-//   date_from=2006-01-02
-//   date_to=2006-01-02
 
 func GetAllTasks(w http.ResponseWriter, r *http.Request) {
 	userID, _ := strconv.Atoi(r.Header.Get("X-User-ID"))
@@ -92,7 +84,6 @@ func buildTaskQuery(userID int, p models.TaskQueryParams) (string, []interface{}
 		args = append(args, p.DateTo)
 	}
 
-	// Safe to interpolate directly since sortBy is validated above
 	query += fmt.Sprintf(" ORDER BY %s %s", p.SortBy, p.Order)
 
 	return query, args
